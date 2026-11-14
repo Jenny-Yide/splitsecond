@@ -121,3 +121,93 @@ We used AI only to brainstorm topics (4.2). After choosing expense splitting, we
 | Store each member's running balance | Calculate balances from an append-only ledger | A stored balance can drift, and cannot show past balances or support restores |
 | One API container | Two replicas sharing events through `LISTEN/NOTIFY` | Availability during restarts; a browser and its claims may reach different replicas |
 | Restarting a container keeps its data | PVC on a DigitalOcean Volume, plus daily backups | Pod filesystems are lost on recreation; a volume alone does not protect against deletion or corruption |
+
+
+
+
+
+## Ledger Module
+
+The Ledger module provides expense tracking, bill splitting,
+balance calculation, settlement recording, and version history.
+
+### Features
+
+- Equal, exact-amount, and share-based splitting
+- Expense creation using PostgreSQL
+- Group balance calculation
+- Suggested settle-up transfers
+- Expense versioning with optimistic concurrency checks
+- Soft deletion and restoration of expenses
+- Historical balance queries
+- Itemized bill finalization
+- Settlement recording with idempotency protection
+
+### Requirements
+
+- Python 3.14
+- PostgreSQL
+- Dependencies listed in `requirements.txt`
+
+### Setup
+
+Create a Python virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Create the development database:
+
+```bash
+createdb splitsecond_db
+```
+
+Initialize the schema:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 \
+  -d splitsecond_db \
+  -f backend/schema.sql
+```
+
+### Running Tests
+
+Create a separate test database:
+
+```bash
+createdb splitsecond_test_db
+```
+
+Initialize the test schema:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 \
+  -d splitsecond_test_db \
+  -f backend/schema.sql
+```
+
+Run all tests:
+
+```bash
+python -m unittest discover -s backend/tests -v
+```
+
+### Notes
+
+- All monetary amounts are stored as integer cents.
+- Positive balances indicate money to be received.
+- Negative balances indicate money owed.
+- Historical expense versions are preserved.
+- Settlements record payments made outside the application.
+- Database-backed tests use `splitsecond_test_db`.
+- API authentication and authorization must be enforced
+  before exposing Ledger operations to users.
+```
