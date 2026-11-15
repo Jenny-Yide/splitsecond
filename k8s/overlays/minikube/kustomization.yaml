@@ -8,3 +8,12 @@ resources:
 images:
   - name: splitsecond-api
     newTag: dev
+
+patches:
+  - target:
+      kind: Gateway
+      name: splitsecond
+    patch: |-
+      - op: replace
+        path: /spec/listeners/1/hostname
+        value: splitsecond.test
