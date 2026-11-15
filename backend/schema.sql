@@ -111,3 +111,22 @@ CREATE TABLE settlements (
 
     CHECK (from_user_id <> to_user_id)
 );
+
+-- 10. Backup runs
+CREATE TABLE backup_runs (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    status VARCHAR(20) NOT NULL
+        CHECK (status IN ('success', 'failed')),
+    object_key TEXT,
+    size_bytes BIGINT CHECK (size_bytes >= 0),
+
+    CHECK (finished_at IS NULL OR finished_at >= started_at),
+    CHECK (status <> 'success' OR (finished_at IS NOT NULL AND object_key IS NOT NULL))
+);
+
+-- /health/backup looks up the latest successful run
+CREATE INDEX backup_runs_success_finished
+ON backup_runs (finished_at DESC)
+WHERE status = 'success';
