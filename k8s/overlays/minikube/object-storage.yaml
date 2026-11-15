@@ -1,0 +1,93 @@
+# Local S3-compatible stand-in for DigitalOcean Spaces (SeaweedFS; MinIO's community images are discontinued).
+# Credentials and bucket name come from the backup-s3 Secret, so the backup code is the same on both.
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs
+spec:
+  selector:
+    app: seaweedfs
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seaweedfs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: seaweedfs
+  template:
+    metadata:
+      labels:
+        app: seaweedfs
+    spec:
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:4.53
+          command: ["sh", "-c"]
+          args:
+            - |
+              printf '{"identities":[{"name":"admin","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
+                "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > /tmp/s3.json
+              exec weed server -dir=/data -s3 -s3.port=9000 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=256
+          envFrom:
+            - secretRef:
+                name: backup-s3
+          ports:
+            - name: s3
+              containerPort: 9000
+          readinessProbe:
+            tcpSocket:
+              port: s3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: seaweedfs-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seaweedfs-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-backup-bucket
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: splitsecond-postgres
+          command: ["sh", "-c"]
+          args:
+            - |
+              s5cmd --endpoint-url "$AWS_ENDPOINT" ls "s3://$S3_BUCKET" >/dev/null 2>&1 \
+                || s5cmd --endpoint-url "$AWS_ENDPOINT" mb "s3://$S3_BUCKET"
+          envFrom:
+            - secretRef:
+                name: backup-s3
