@@ -10,6 +10,8 @@ curl localhost:8080/health   # repeat: "host" alternates between the two API rep
 
 Compose runs PostgreSQL 16, two API replicas, and nginx on port 8080 (WebSockets on `/ws`).
 PostgreSQL is also published on `127.0.0.1:5433` for `psql` or a GUI client.
+It also runs the backup pieces described under [Backups](#backups): SeaweedFS (S3 on `127.0.0.1:9100`),
+WAL archiving from PostgreSQL, and the `base-backup` service.
 
 Run the ledger tests against the Compose database:
 
@@ -76,3 +78,57 @@ kubectl apply -k k8s/overlays/minikube
 | `/livez` | Process is up (Kubernetes liveness probe; does not touch the database) |
 | `/health` | Database reachable (readiness probe and uptime check) |
 | `/health/backup` | 503 if the latest successful row in `backup_runs` is older than 26 hours |
+
+## Backups
+
+### Recovery point objective
+
+A nightly dump alone could lose up to 24 hours of expense history. Instead, PostgreSQL continuously
+archives its write-ahead log (WAL) to object storage with [wal-g](https://github.com/wal-g/wal-g):
+
+- Every completed WAL segment is uploaded by `archive_command = 'wal-g wal-push %p'`.
+- `archive_timeout = 300` forces a segment switch at least every 5 minutes when there are writes,
+  so at most about **5 minutes** of committed changes are not yet in object storage.
+- A daily **base backup** (`wal-g backup-push`) is the starting point for replaying WAL. The last 7 are kept.
+
+Together these allow restoring to any moment covered by the archive (point-in-time recovery).
+
+### Components
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| `docker/postgres/Dockerfile` | image `splitsecond-postgres` | `postgres:16` plus pinned, checksum-verified `wal-g` and `s5cmd`; includes `schema.sql` and `backup/` |
+| `archive_*` settings | `postgres` container | Push WAL to `$WALG_S3_PREFIX` |
+| `backup/base-backup.sh` | `base-backup` sidecar in the `postgres-0` pod (Compose: `base-backup` service) | Every 5 minutes, checks `backup_runs`; if the last successful `base` backup is older than 24 hours, takes one, records it, and applies retention |
+| `backup-s3` Secret | `k8s/create-secrets.sh` | Endpoint, region, keys, bucket, and `WALG_S3_PREFIX` |
+| SeaweedFS | `k8s/overlays/minikube/object-storage.yaml` (Compose: `seaweedfs`) | Local S3 stand-in for DigitalOcean Spaces |
+
+The sidecar shares the pod because wal-g reads the data directory directly and the volume is ReadWriteOnce.
+It runs as the `postgres` user (UID 999) so it can read `PGDATA`.
+
+On DOKS, `backup-s3` points at Spaces instead (see the comment in `create-secrets.sh`); nothing else changes.
+
+### Minikube setup
+
+```sh
+minikube image build -t splitsecond-postgres:dev -f docker/postgres/Dockerfile .
+./k8s/create-secrets.sh                      # adds backup-s3 if missing
+kubectl apply -k k8s/overlays/minikube
+```
+
+An existing cluster needs a fresh PostgreSQL volume, because the schema changed
+(`backup_runs.kind`): delete the `postgres` StatefulSet and the `data-postgres-0` PVC, then apply.
+
+### Useful commands
+
+```sh
+# Take a base backup now
+kubectl -n splitsecond exec postgres-0 -c base-backup -- /backup/base-backup.sh --once
+
+# List base backups
+kubectl -n splitsecond exec postgres-0 -c base-backup -- wal-g backup-list
+
+# WAL archiving status (failed_count should stay 0)
+kubectl -n splitsecond exec postgres-0 -- sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT * FROM pg_stat_archiver"'
+```
