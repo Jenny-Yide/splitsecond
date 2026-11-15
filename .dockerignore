@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+.env
+.env.*
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.DS_Store
+backend/tests
+docker-compose.yml
+nginx
+docker
+k8s
+docs
+README.md
