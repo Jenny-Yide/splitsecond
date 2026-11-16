@@ -77,7 +77,7 @@ kubectl apply -k k8s/overlays/minikube
 | --- | --- |
 | `/livez` | Process is up (Kubernetes liveness probe; does not touch the database) |
 | `/health` | Database reachable (readiness probe and uptime check) |
-| `/health/backup` | 503 if the latest successful row in `backup_runs` is older than 26 hours |
+| `/health/backup` | 503 if backups or WAL archiving need attention; see [Backup health](#backup-health) |
 
 ## Backups
 
@@ -121,6 +121,42 @@ kubectl apply -k k8s/overlays/minikube
 
 An existing cluster needs a fresh PostgreSQL volume, because the schema changed
 (`backup_runs.kind`): delete the `postgres` StatefulSet and the `data-postgres-0` PVC, then apply.
+
+### Daily logical dump
+
+Independently of wal-g, the `pg-dump` CronJob (`k8s/base/backup-cronjob.yaml`, 03:00 America/Toronto)
+runs `backup/dump.sh`. It streams `pg_dump --format=custom` to `s3://$S3_BUCKET/dumps/YYYY-MM-DD/HHMMSS.dump`,
+records the run in `backup_runs` (`kind = 'dump'`), and deletes dump folders older than `DUMP_RETAIN_DAYS`
+(default 30). A dump restores into any PostgreSQL 16 without wal-g, so it is a second, simpler copy.
+
+```sh
+# Kubernetes: run the CronJob now
+kubectl -n splitsecond create job --from=cronjob/pg-dump pg-dump-manual-$(date +%s)
+
+# Compose
+docker compose --profile backup run --rm dump
+```
+
+### Backup health
+
+`/health/backup` returns 503 with a list of `problems` when any of these hold:
+
+| Check | Problem when |
+| --- | --- |
+| Dump age | No successful `dump` in `backup_runs` within `BACKUP_MAX_AGE_HOURS` (26) |
+| Base backup age | No successful `base` within `BACKUP_MAX_AGE_HOURS` (26) |
+| WAL archiving failing | `pg_stat_archiver.last_failed_time` is newer than `last_archived_time` |
+| WAL archiving behind | Completed WAL segments have waited more than `WAL_ARCHIVE_MAX_LAG_MINUTES` (15) |
+
+The "behind" check exists because a failure alone is not enough: with object storage unreachable,
+the first archive failure took about 2 minutes to register even with the `timeout`, and an idle
+database archives nothing, so the age of the last archive alone would raise false alarms.
+Pointing an uptime check at this endpoint therefore alerts on missed dumps, missed base backups,
+and WAL archiving outages.
+
+Tested by stopping SeaweedFS in Compose (with the lag limit set to 1 minute): after 75 seconds the
+endpoint reported the segment as behind, after 135 seconds also as failing, and it returned to
+200 about 30 seconds after storage came back.
 
 ### Useful commands
 
