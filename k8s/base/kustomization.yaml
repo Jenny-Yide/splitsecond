@@ -12,4 +12,4 @@ resources:
   - postgres.yaml
   - backup-cronjob.yaml
   - api.yaml
-  - ingress.yaml
+  - gateway.yaml

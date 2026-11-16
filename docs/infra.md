@@ -30,11 +30,14 @@ docker compose down -v && docker compose up -d --build --wait
 One-time setup:
 
 ```sh
-brew install minikube
+brew install minikube helm
 minikube start --driver=docker --cpus=2 --memory=4096
-minikube addons enable ingress
-./k8s/create-secrets.sh      # random passwords; existing Secrets are kept
+./k8s/minikube-setup.sh      # Envoy Gateway, cert-manager, local CA issuer, Secrets
 ```
+
+`minikube-setup.sh` is safe to re-run. It installs pinned versions of Envoy Gateway (which brings
+the Gateway API CRDs) and cert-manager with Gateway API support, applies the cluster-wide
+resources in `k8s/cluster/`, and runs `create-secrets.sh` (random passwords; existing Secrets are kept).
 
 Deploy (repeat after code changes):
 
@@ -44,12 +47,38 @@ kubectl apply -k k8s/overlays/minikube
 kubectl -n splitsecond rollout restart deployment/api   # pick up a rebuilt :dev image
 ```
 
-Reach the app through the ingress:
+### Routing and HTTPS
+
+Traffic enters through a Gateway API `Gateway` (`k8s/base/gateway.yaml`) served by Envoy Gateway;
+ingress-nginx is retired and no longer used. The Gateway has two listeners:
+
+- `http` (80) only redirects to HTTPS (`http-to-https` route).
+- `https` (443) terminates TLS and routes everything, including `/ws` WebSockets, to the `api` Service.
+
+cert-manager watches the Gateway (annotation `cert-manager.io/cluster-issuer: splitsecond-issuer`) and
+keeps the `splitsecond-tls` certificate issued for the listener hostname. Each cluster defines its own
+`splitsecond-issuer`: on minikube it is a local CA (`k8s/cluster/minikube-issuer.yaml`), on DOKS it will
+be Let's Encrypt. The minikube overlay sets the hostname to `splitsecond.test`.
+
+Envoy's default timeouts keep WebSockets open: a connection held for 150 seconds received every 30-second
+server ping, so no timeout policy is configured.
+
+Reach the app over HTTPS (minikube has no external load balancer, so the Gateway's `Programmed`
+condition stays `False` with `AddressNotAssigned`; that is expected):
 
 ```sh
-kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8081:80
-curl localhost:8081/health
+SVC=$(kubectl -n envoy-gateway-system get svc \
+    -l gateway.envoyproxy.io/owning-gateway-name=splitsecond -o name)
+kubectl -n envoy-gateway-system port-forward "$SVC" 8081:80 8443:443
+
+kubectl -n cert-manager get secret splitsecond-local-ca \
+    -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/splitsecond-ca.crt
+curl --cacert /tmp/splitsecond-ca.crt --resolve splitsecond.test:8443:127.0.0.1 \
+    https://splitsecond.test:8443/health
 ```
+
+Alternatively, run `minikube tunnel` to give the Gateway a real address and add it to `/etc/hosts`
+as `splitsecond.test`.
 
 The schema is copied from the API image and applied only when the PostgreSQL volume is new.
 To apply a schema change to an existing cluster, either run the SQL by hand

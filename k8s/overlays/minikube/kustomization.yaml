@@ -15,3 +15,12 @@ images:
     newTag: dev
   - name: splitsecond-postgres
     newTag: dev
+
+patches:
+  - target:
+      kind: Gateway
+      name: splitsecond
+    patch: |-
+      - op: replace
+        path: /spec/listeners/1/hostname
+        value: splitsecond.test
