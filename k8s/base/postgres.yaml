@@ -28,6 +28,27 @@ spec:
         kubectl.kubernetes.io/default-container: postgres
     spec:
       terminationGracePeriodSeconds: 60
+      initContainers:
+        # Does nothing unless the postgres-restore ConfigMap exists and the volume is empty
+        # (disaster recovery; see k8s/recover-postgres.sh).
+        - name: restore
+          image: splitsecond-postgres
+          command: ["/backup/restore-pitr.sh", "--if-requested"]
+          envFrom:
+            - secretRef:
+                name: backup-s3
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: RESTORE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-restore
+                  key: target
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
       containers:
         # The image (docker/postgres) contains wal-g and applies schema.sql when the volume is empty.
         - name: postgres
