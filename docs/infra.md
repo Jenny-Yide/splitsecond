@@ -59,6 +59,16 @@ kubectl -n splitsecond delete pvc data-postgres-0
 kubectl apply -k k8s/overlays/minikube
 ```
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`:
+
+| Job | Checks |
+| --- | --- |
+| `ledger-tests` | Applies `backend/schema.sql` to a PostgreSQL 16 service and runs `backend/tests` |
+| `compose-smoke` | `docker compose up --build`, then confirms both API replicas answer `/health` through nginx |
+| `manifests` | Renders every overlay in `k8s/overlays/` and validates it with kubeconform |
+
 ## Health endpoints
 
 | Path | Meaning |
