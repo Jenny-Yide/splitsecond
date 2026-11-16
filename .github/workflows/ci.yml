@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: splitsecond
+          POSTGRES_PASSWORD: splitsecond
+          POSTGRES_DB: splitsecond_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U splitsecond"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # The tests connect with dbname=splitsecond_test_db; libpq takes the rest from these.
+      PGHOST: localhost
+      PGUSER: splitsecond
+      PGPASSWORD: splitsecond
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Apply schema
+        run: psql -v ON_ERROR_STOP=1 -d splitsecond_test_db -f backend/schema.sql
+      - name: Run ledger tests
+        run: python -m unittest discover -s backend/tests -v
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cp .env.example .env
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait
+      - name: Check both API replicas answer through nginx
+        run: |
+          hosts=$(for _ in $(seq 1 10); do curl -fsS localhost:8080/health; echo; done \
+            | python3 -c 'import sys, json; print(len({json.loads(l)["host"] for l in sys.stdin if l.strip()}))')
+          echo "distinct API hosts: $hosts"
+          test "$hosts" -eq 2
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+  manifests:
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+      - name: Render and validate every overlay
+        run: |
+          for overlay in k8s/overlays/*/; do
+            echo "::group::$overlay"
+            kubectl kustomize "$overlay" | kubeconform -strict -summary \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+          done

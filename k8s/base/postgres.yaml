@@ -29,19 +29,45 @@ spec:
     spec:
       terminationGracePeriodSeconds: 60
       initContainers:
-        # schema.sql ships in the API image; postgres applies it only when the volume is empty.
-        - name: copy-schema
-          image: splitsecond-api
-          command: ["cp", "/app/backend/schema.sql", "/initdb/10-schema.sql"]
+        # Does nothing unless the postgres-restore ConfigMap exists and the volume is empty
+        # (disaster recovery; see k8s/recover-postgres.sh).
+        - name: restore
+          image: splitsecond-postgres
+          command: ["/backup/restore-pitr.sh", "--if-requested"]
+          envFrom:
+            - secretRef:
+                name: backup-s3
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: RESTORE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-restore
+                  key: target
+                  optional: true
           volumeMounts:
-            - name: initdb
-              mountPath: /initdb
+            - name: data
+              mountPath: /var/lib/postgresql/data
       containers:
+        # The image (docker/postgres) contains wal-g and applies schema.sql when the volume is empty.
         - name: postgres
-          image: postgres:16
+          image: splitsecond-postgres
+          args:
+            - -c
+            - archive_mode=on
+            - -c
+            # wal-g can retry for 10+ minutes when storage is unreachable; failing fast lets PostgreSQL
+            # retry the segment and report the failure in pg_stat_archiver.
+            - archive_command=timeout 120 wal-g wal-push %p
+            # Force a WAL segment switch at least every 5 minutes: at most ~5 minutes of writes are unarchived.
+            - -c
+            - archive_timeout=300
           envFrom:
             - secretRef:
                 name: postgres-credentials
+            - secretRef:
+                name: backup-s3
           env:
             # A subdirectory, because block storage volumes have lost+found at their root.
             - name: PGDATA
@@ -68,11 +94,38 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
-            - name: initdb
-              mountPath: /docker-entrypoint-initdb.d
-      volumes:
-        - name: initdb
-          emptyDir: {}
+        # wal-g base backups must read PGDATA, and the volume is ReadWriteOnce, so this runs in the same pod.
+        - name: base-backup
+          image: splitsecond-postgres
+          command: ["/backup/base-backup.sh"]
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+            - secretRef:
+                name: backup-s3
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: PGHOST
+              value: 127.0.0.1
+            - name: PGUSER
+              value: $(POSTGRES_USER)
+            - name: PGPASSWORD
+              value: $(POSTGRES_PASSWORD)
+            - name: PGDATABASE
+              value: $(POSTGRES_DB)
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-dump
+spec:
+  schedule: "0 3 * * *"
+  timeZone: America/Toronto
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+          containers:
+            - name: pg-dump
+              image: splitsecond-postgres
+              command: ["/backup/dump.sh"]
+              envFrom:
+                - secretRef:
+                    name: postgres-credentials
+                - secretRef:
+                    name: backup-s3
+              env:
+                - name: PGHOST
+                  value: postgres
+                - name: PGUSER
+                  value: $(POSTGRES_USER)
+                - name: PGPASSWORD
+                  value: $(POSTGRES_PASSWORD)
+                - name: PGDATABASE
+                  value: $(POSTGRES_DB)
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi

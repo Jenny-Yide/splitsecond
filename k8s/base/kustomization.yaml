@@ -10,5 +10,6 @@ labels:
 resources:
   - namespace.yaml
   - postgres.yaml
+  - backup-cronjob.yaml
   - api.yaml
   - gateway.yaml

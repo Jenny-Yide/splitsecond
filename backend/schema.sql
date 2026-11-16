@@ -115,6 +115,9 @@ CREATE TABLE settlements (
 -- 10. Backup runs
 CREATE TABLE backup_runs (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    -- 'dump': daily pg_dump; 'base': wal-g base backup for point-in-time recovery
+    kind VARCHAR(20) NOT NULL
+        CHECK (kind IN ('dump', 'base')),
     started_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ,
     status VARCHAR(20) NOT NULL
@@ -126,7 +129,7 @@ CREATE TABLE backup_runs (
     CHECK (status <> 'success' OR (finished_at IS NOT NULL AND object_key IS NOT NULL))
 );
 
--- /health/backup looks up the latest successful run
+-- /health/backup looks up the latest successful run of each kind
 CREATE INDEX backup_runs_success_finished
-ON backup_runs (finished_at DESC)
+ON backup_runs (kind, finished_at DESC)
 WHERE status = 'success';
