@@ -36,7 +36,9 @@ spec:
             - -c
             - archive_mode=on
             - -c
-            - archive_command=wal-g wal-push %p
+            # wal-g can retry for 10+ minutes when storage is unreachable; failing fast lets PostgreSQL
+            # retry the segment and report the failure in pg_stat_archiver.
+            - archive_command=timeout 120 wal-g wal-push %p
             # Force a WAL segment switch at least every 5 minutes: at most ~5 minutes of writes are unarchived.
             - -c
             - archive_timeout=300
