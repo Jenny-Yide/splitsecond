@@ -64,6 +64,22 @@ services:
       postgres:
         condition: service_healthy
 
+  # Kubernetes runs this daily as a CronJob; locally: docker compose --profile backup run --rm dump
+  dump:
+    image: splitsecond-postgres:dev
+    pull_policy: never
+    profiles: ["backup"]
+    command: ["/backup/dump.sh"]
+    environment:
+      <<: *s3-env
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-splitsecond}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-splitsecond}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   seaweedfs:
     image: chrislusf/seaweedfs:4.53
     entrypoint: ["sh", "-c"]
