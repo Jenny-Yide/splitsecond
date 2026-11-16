@@ -3,7 +3,8 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
 
 WORKDIR /app
 
@@ -11,6 +12,10 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY backend/ backend/
+# Restore verification and drill tools; they import the ledger code.
+COPY backup/verify_balances.py backup/drill_writer.py backup/
+# COPY keeps the build machine's file modes; the non-root user must be able to read everything.
+RUN chmod -R a+rX /app
 
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 USER 10001
