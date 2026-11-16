@@ -86,7 +86,10 @@ kubectl apply -k k8s/overlays/minikube
 A nightly dump alone could lose up to 24 hours of expense history. Instead, PostgreSQL continuously
 archives its write-ahead log (WAL) to object storage with [wal-g](https://github.com/wal-g/wal-g):
 
-- Every completed WAL segment is uploaded by `archive_command = 'wal-g wal-push %p'`.
+- Every completed WAL segment is uploaded by `archive_command = 'timeout 120 wal-g wal-push %p'`.
+  The timeout matters: with storage unreachable, wal-g kept retrying for over 10 minutes without
+  failing, which stalls archiving silently. A failed attempt is retried by PostgreSQL and shows up in
+  `pg_stat_archiver`.
 - `archive_timeout = 300` forces a segment switch at least every 5 minutes when there are writes,
   so at most about **5 minutes** of committed changes are not yet in object storage.
 - A daily **base backup** (`wal-g backup-push`) is the starting point for replaying WAL. The last 7 are kept.

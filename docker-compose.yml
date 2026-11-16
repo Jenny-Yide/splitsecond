@@ -26,7 +26,7 @@ services:
       - -c
       - archive_mode=on
       - -c
-      - archive_command=wal-g wal-push %p
+      - archive_command=timeout 120 wal-g wal-push %p
       - -c
       - archive_timeout=300
     environment:
