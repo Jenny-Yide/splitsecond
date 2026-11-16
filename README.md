@@ -33,7 +33,7 @@ Users can:
 
 ### 2.2 Architecture
 
-The backend is a stateless Python FastAPI service with a simple web UI that works on phones. It runs as two replicas behind an ingress-nginx Ingress on DigitalOcean Kubernetes (DOKS). All state is in PostgreSQL, which runs as a single-replica StatefulSet with its data on a DigitalOcean Volume. A daily CronJob backs up the database to DigitalOcean Spaces. The API is stateless, so any replica serves any request and we need no sticky sessions, even for WebSockets (2.5).
+The backend is a stateless Python FastAPI service with a simple web UI that works on phones. It runs as two replicas on DigitalOcean Kubernetes (DOKS), behind a Gateway API `Gateway` implemented by Envoy Gateway (ingress-nginx is retired). All state is in PostgreSQL, which runs as a single-replica StatefulSet with its data on a DigitalOcean Volume. PostgreSQL continuously archives its write-ahead log (WAL) to DigitalOcean Spaces, alongside a daily base backup and a daily logical dump, so a failure loses at most about five minutes of changes. The API is stateless, so any replica serves any request and we need no sticky sessions, even for WebSockets (2.5).
 
 The main trade-off is that the database is a single point of failure. DigitalOcean Volumes are ReadWriteOnce, so if the database's node fails, the volume must be reattached elsewhere and the app is down for a few minutes. Replicated PostgreSQL would avoid this but adds failover logic we could not test in time. For an expense app, brief downtime is acceptable but losing data is not, so we spend our effort on backups and tested restores.
 
@@ -56,18 +56,18 @@ The main tables are `users`, `groups`, `group_members`, `expenses`, `expense_sha
 | PostgreSQL | Stores the ledger; its constraints and transactions enforce correctness. |
 | Persistent storage | PostgreSQL StatefulSet with a PVC backed by a DigitalOcean Volume, so data survives pod restarts and rescheduling. |
 | Deployment | DigitalOcean: DOKS, Container Registry, Volumes, and Spaces. |
-| Orchestration | Kubernetes: minikube locally, then DOKS. A Deployment and Service for the API, a StatefulSet and PVC for the database, a backup CronJob, and an Ingress. We chose Kubernetes over Swarm mainly for StatefulSets and CronJobs. |
-| Monitoring | DigitalOcean alerts on node CPU, memory, and disk, and a DigitalOcean Uptime check on `/health`. The backup job records each success in `backup_runs`; `/health/backup` returns 503 if the last success is over 26 hours old, so a second Uptime check turns a missed backup into an alert. |
+| Orchestration | Kubernetes: minikube locally, then DOKS. A Deployment and Service for the API, a StatefulSet and PVC for the database with a base-backup sidecar, a dump CronJob, and a Gateway with HTTPRoutes. We chose Kubernetes over Swarm mainly for StatefulSets and CronJobs. |
+| Monitoring | DigitalOcean alerts on node CPU, memory, and disk, and a DigitalOcean Uptime check on `/health`. Each dump and base backup is recorded in `backup_runs`. `/health/backup` returns 503 if either is over 26 hours old, or if WAL archiving is failing or over 15 minutes behind, so a second Uptime check turns a backup problem into an alert. |
 
 We are not planning auto-scaling; two replicas for availability is enough for this traffic (see 4.2).
 
 ### 2.5 Advanced features
 
-1. **Real-time updates.** Live bills use WebSockets. A browser stays connected to one replica, but its claims may be handled by another. Each replica holds a dedicated PostgreSQL connection that `LISTEN`s on a channel and forwards events to its clients, avoiding Redis. `NOTIFY` is delivered only after commit, so clients never see a rolled-back claim. Payloads are capped at 8000 bytes, so we send only the bill ID and event type. Missed messages are not stored, so clients reload the full bill on reconnect. ingress-nginx drops idle connections after 60 seconds by default, so the server sends periodic pings.
-2. **Backup and recovery.** The in-app history covers user mistakes. For infrastructure failures, a daily `pg_dump` CronJob uploads a compressed dump to Spaces, using credentials from a Kubernetes Secret. A restore script is tested by restoring into a fresh database and checking every group's balances match. If time allows, we will add WAL archiving for point-in-time recovery.
-3. **Security.** Hashed passwords, JWT sessions, group-level access checks, HTTPS with cert-manager and Let's Encrypt, and credentials stored in Kubernetes Secrets.
+1. **Real-time updates.** Live bills use WebSockets. A browser stays connected to one replica, but its claims may be handled by another. Each replica holds a dedicated PostgreSQL connection that `LISTEN`s on a channel and forwards events to its clients, avoiding Redis. `NOTIFY` is delivered only after commit, so clients never see a rolled-back claim. Payloads are capped at 8000 bytes, so we send only the bill ID and event type. Missed messages are not stored, so clients reload the full bill on reconnect. Proxies and load balancers can drop idle connections, so the server sends a ping every 30 seconds.
+2. **Backup and recovery.** The in-app history covers user mistakes. For infrastructure failures, a nightly backup alone could lose a full day of expenses, so we size backups to the loss we accept: about five minutes. PostgreSQL archives its WAL to Spaces with wal-g, forcing a new segment at least every five minutes (`archive_timeout`), and a sidecar takes a daily base backup. Together they allow point-in-time recovery to any moment in the last seven days, for example to just before a bad change. A daily `pg_dump` CronJob adds a simpler second copy that restores without wal-g. Credentials come from a Kubernetes Secret. Restores are tested with drills: a script restores into a separate database and checks that every group's balances match a snapshot taken with the ledger's own functions, and a simulated crash during writes measures the actual data loss and recovery time.
+3. **Security.** Hashed passwords, JWT sessions, group-level access checks, HTTPS on the Gateway with cert-manager and Let's Encrypt (HTTP redirects to HTTPS), and credentials stored in Kubernetes Secrets.
 
-A GitHub Actions CI/CD pipeline is a stretch goal.
+GitHub Actions runs the ledger tests and checks the Compose stack and Kubernetes manifests on every pull request; automatic deployment is a stretch goal.
 
 ### 2.6 Scope
 
@@ -120,7 +120,7 @@ We used AI only to brainstorm topics (4.2). After choosing expense splitting, we
 | --- | --- | --- |
 | Store each member's running balance | Calculate balances from an append-only ledger | A stored balance can drift, and cannot show past balances or support restores |
 | One API container | Two replicas sharing events through `LISTEN/NOTIFY` | Availability during restarts; a browser and its claims may reach different replicas |
-| Restarting a container keeps its data | PVC on a DigitalOcean Volume, plus daily backups | Pod filesystems are lost on recreation; a volume alone does not protect against deletion or corruption |
+| Restarting a container keeps its data | PVC on a DigitalOcean Volume, plus WAL archiving and daily backups | Pod filesystems are lost on recreation; a volume alone does not protect against deletion or corruption |
 
 
 
