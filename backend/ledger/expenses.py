@@ -82,8 +82,13 @@ def create_expense(
     split_mode: str,
     split_data,
     description: str,
+    idempotency_key=None,
 ):
-    """Create an expense using equal, exact, or shares split."""
+    """Create an expense using equal, exact, or shares split.
+
+    idempotency_key: optional client-generated UUID. A retry with the same key
+    hits the UNIQUE constraint instead of creating a second expense.
+    """
 
     # 1. Calculate the shares.
     if split_mode == "equal":
@@ -140,7 +145,7 @@ def create_expense(
                     payer_id,
                     total_cents,
                     description,
-                    uuid4(),
+                    idempotency_key or uuid4(),
                 ),
             )
 

@@ -1,4 +1,9 @@
 psycopg==3.3.9
 psycopg-binary==3.3.9
+psycopg-pool==3.3.3
 fastapi==0.163.1
 uvicorn[standard]==0.54.0
+bcrypt==5.0.0
+PyJWT==2.15.0
+# FastAPI's TestClient (backend/tests/test_api.py)
+httpx==0.28.1

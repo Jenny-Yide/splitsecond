@@ -1,21 +1,64 @@
 import asyncio
+import logging
 import os
 import socket
+from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 
 import psycopg
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+
+from backend.app import auth, db
+from backend.app.api import ApiError, require_member, router
+from backend.app.realtime import Hub
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+for noisy in ("httpx", "httpx2"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 BACKUP_MAX_AGE = timedelta(hours=float(os.environ.get("BACKUP_MAX_AGE_HOURS", "26")))
 # With archive_timeout=300 a completed segment normally waits at most a few minutes.
 WAL_ARCHIVE_MAX_LAG = timedelta(minutes=float(os.environ.get("WAL_ARCHIVE_MAX_LAG_MINUTES", "15")))
-# Must stay below the ingress idle timeout (60s by default in ingress-nginx).
+# Must stay below proxy and load-balancer idle timeouts (often 60 s).
 WS_PING_SECONDS = float(os.environ.get("WS_PING_SECONDS", "30"))
 HOSTNAME = socket.gethostname()
 
-app = FastAPI(title="SplitSecond")
+hub: Hub | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global hub
+    await run_in_threadpool(db.open_pool, DATABASE_URL)
+    hub = Hub(DATABASE_URL)
+    await hub.start()
+    yield
+    await hub.stop()
+    await run_in_threadpool(db.close_pool)
+
+
+app = FastAPI(title="SplitSecond", lifespan=lifespan)
+app.include_router(router)
+
+
+@app.exception_handler(ApiError)
+async def api_error(_, exc: ApiError):
+    return JSONResponse({"error": exc.detail, **exc.extra}, status_code=exc.status_code)
+
+
+@app.exception_handler(HTTPException)
+async def http_error(_, exc: HTTPException):
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(psycopg.errors.CheckViolation)
+async def check_violation(_, exc: Exception):
+    return JSONResponse({"error": f"rejected by the database: {exc}"}, status_code=422)
 
 
 def connect():
@@ -44,7 +87,12 @@ def health():
         return JSONResponse(
             {"status": "database unavailable", "host": HOSTNAME}, status_code=503
         )
-    return {"status": "ok", "host": HOSTNAME}
+    return {
+        "status": "ok",
+        "host": HOSTNAME,
+        "realtime_listening": bool(hub and hub.listening),
+        "websockets": hub.socket_count if hub else 0,
+    }
 
 
 @app.get("/health/backup")
@@ -149,3 +197,43 @@ async def websocket_echo(websocket: WebSocket):
         pass
     finally:
         pinger.cancel()
+
+
+@app.websocket("/ws/groups/{group_id}")
+async def group_socket(websocket: WebSocket, group_id: int, token: str = ""):
+    """Live updates for one group. Pushes {"type": "bill_updated" | "ledger_changed" |
+    "members_changed" | "resync" | "ping", ...}; clients re-fetch over HTTP."""
+
+    def authorize():
+        user_id = auth.read_token(token)
+        with db.tx() as conn:
+            require_member(conn, group_id, user_id)
+
+    try:
+        await run_in_threadpool(authorize)
+    except HTTPException:
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    hub.add(group_id, websocket)
+
+    async def ping():
+        # Proxies and load balancers drop idle connections.
+        while True:
+            await asyncio.sleep(WS_PING_SECONDS)
+            await websocket.send_json({"type": "ping", "host": HOSTNAME})
+
+    pinger = asyncio.create_task(ping())
+    try:
+        await websocket.send_json({"type": "hello", "host": HOSTNAME})
+        while True:
+            await websocket.receive_text()  # client keepalives; content ignored
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        pinger.cancel()
+        hub.remove(group_id, websocket)
+
+
+# The phone web UI. Mounted last so it never shadows the API routes above.
+app.mount("/", StaticFiles(directory=Path(__file__).with_name("static"), html=True), name="ui")

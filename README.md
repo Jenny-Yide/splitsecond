@@ -211,3 +211,7 @@ python -m unittest discover -s backend/tests -v
 - API authentication and authorization must be enforced
   before exposing Ledger operations to users.
 ```
+
+## API, realtime and web UI
+
+The FastAPI app in `backend/app/` adds sign-up and login (bcrypt + JWT), group-membership checks on every route, the live-bill claiming API, WebSocket updates across replicas through PostgreSQL `LISTEN/NOTIFY`, and a phone-friendly web UI served at `/`. See [docs/api.md](docs/api.md) for routes, the realtime protocol and how to run it.
