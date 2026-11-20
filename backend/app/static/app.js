@@ -132,8 +132,9 @@ function connectGroup(gid) {
     scheduleRefresh(msg);  // "hello" = (re)connected: we may have missed events, so reload too
   };
   ws.onclose = () => {
-    setLive(false);
+    // Intentional disconnect() clears state.ws first; don't flash "reconnecting".
     if (state.ws !== ws || state.wsGroup !== gid) return;
+    setLive(false);
     const delay = Math.min(1000 * 2 ** state.wsRetry++, 15000);
     setTimeout(() => { if (state.wsGroup === gid && state.ws === ws) { state.ws = null; connectGroup(gid); } }, delay);
   };
@@ -205,7 +206,7 @@ window.addEventListener("hashchange", render);
 
 function renderAuth(mode = "login") {
   const isSignup = mode === "signup";
-  const form = h("form", { class: "card",
+  const form = h("form", {
     onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = new FormData(e.target);
@@ -220,12 +221,21 @@ function renderAuth(mode = "login") {
     h("label", {}, "Password"),
     h("input", { name: "password", type: "password", required: true, minLength: isSignup ? 8 : 1,
       autocomplete: isSignup ? "new-password" : "current-password" }),
-    h("div", { class: "actions" }, h("button", { type: "submit" }, isSignup ? "Create account" : "Log in")));
-  $app.replaceChildren(h("div", { class: "center" },
+    h("button", { type: "submit" }, isSignup ? "Create account" : "Log in"));
+  const mark = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  mark.setAttribute("viewBox", "0 0 32 32");
+  mark.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  for (const [k, v] of Object.entries({ d: "M7 24L25 8M7 9h8M17 23h8", stroke: "white", "stroke-width": "3.2",
+    "stroke-linecap": "round", fill: "none" })) path.setAttribute(k, v);
+  mark.append(path);
+  $app.replaceChildren(h("div", { class: "auth" },
+    h("div", { class: "auth-mark" }, mark),
+    h("p", { class: "brand-hero" }, "Split", h("span", {}, "Second")),
     h("h1", {}, isSignup ? "Create your account" : "Welcome back"),
-    h("p", { class: "muted" }, "Split bills fairly, claim your own items, and keep a history nobody can lose."),
+    h("p", { class: "lede" }, "Split bills fairly, claim your own items, and keep a history nobody can lose."),
     form,
-    h("p", { class: "muted small" }, isSignup ? "Already have an account? " : "New here? ",
+    h("p", { class: "muted small switch" }, isSignup ? "Already have an account? " : "New here? ",
       h("button", { class: "link", onclick: () => renderAuth(isSignup ? "login" : "signup") }, isSignup ? "Log in" : "Sign up"))));
 }
 
@@ -604,7 +614,7 @@ async function renderBill(billId) {
       h("button", { type: "submit", class: "secondary" }, "Add"));
 
     const unclaimed = bill.unclaimed_item_ids.length;
-    const preview = h("div", { class: "card" }, h("strong", {}, open ? "So far" : "Final split"),
+    const preview = h("div", { class: "card bill-summary" }, h("strong", {}, open ? "So far" : "Final split"),
       bill.preview.length ? bill.preview.map((p) => h("div", { class: "row small", style: "margin-top:8px" },
         h("div", { class: "grow" }, h("div", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, name(p.user_id)),
           h("div", { class: "muted" }, `${fmt(p.subtotal_cents)} + tax ${fmt(p.tax_cents)} + tip ${fmt(p.tip_cents)}`)),
@@ -624,7 +634,7 @@ async function renderBill(billId) {
         h("select", { style: "max-width:200px", onchange: (e) => { claimAs = Number(e.target.value); draw(); } },
           g.members.map((m) => h("option", { value: m.id, selected: m.id === claimAs }, m.id === state.me.id ? `${m.username} (me)` : m.username)))),
       items, addForm, preview,
-      open && h("div", { class: "actions" },
+      open && h("div", { class: "actions bill-cta" },
         h("button", { disabled: unclaimed > 0 || !bill.items.length, onclick: guard(async () => {
           bill = await api("POST", `/api/bills/${bill.id}/finalize`);
           toast("Added to the ledger"); draw();
