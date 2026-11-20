@@ -1,0 +1,67 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: splitsecond
+
+resources:
+  - ../../base
+
+# One DOCR repository (Starter plan allows only one) with two tags.
+#   docker build -t registry.digitalocean.com/splitsecond/splitsecond:api .
+#   docker build -t registry.digitalocean.com/splitsecond/splitsecond:postgres -f docker/postgres/Dockerfile .
+images:
+  - name: splitsecond-api
+    newName: registry.digitalocean.com/splitsecond/splitsecond
+    newTag: api
+  - name: splitsecond-postgres
+    newName: registry.digitalocean.com/splitsecond/splitsecond
+    newTag: postgres
+
+patches:
+  - target:
+      kind: Gateway
+      name: splitsecond
+    patch: |-
+      - op: replace
+        path: /spec/gatewayClassName
+        value: cilium
+      - op: replace
+        path: /spec/listeners/1/hostname
+        value: splitsecond.duckdns.org
+      # Terminate TLS in-cluster (cert-manager Secret); LB must pass TCP through.
+      - op: add
+        path: /spec/infrastructure
+        value:
+          annotations:
+            service.beta.kubernetes.io/do-loadbalancer-tls-passthrough: "true"
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: do-block-storage
+      # Tags like :api are not :latest; Always avoids stale node caches after re-push.
+      - op: add
+        path: /spec/template/spec/initContainers/0/imagePullPolicy
+        value: Always
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+      - op: add
+        path: /spec/template/spec/containers/1/imagePullPolicy
+        value: Always
+  - target:
+      kind: Deployment
+      name: api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+  - target:
+      kind: CronJob
+      name: pg-dump
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
+        value: Always

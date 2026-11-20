@@ -57,8 +57,9 @@ ingress-nginx is retired and no longer used. The Gateway has two listeners:
 
 cert-manager watches the Gateway (annotation `cert-manager.io/cluster-issuer: splitsecond-issuer`) and
 keeps the `splitsecond-tls` certificate issued for the listener hostname. Each cluster defines its own
-`splitsecond-issuer`: on minikube it is a local CA (`k8s/cluster/minikube-issuer.yaml`), on DOKS it will
-be Let's Encrypt. The minikube overlay sets the hostname to `splitsecond.test`.
+`splitsecond-issuer`: on minikube it is a local CA (`k8s/cluster/minikube-issuer.yaml`), on DOKS it is
+Let's Encrypt (`k8s/cluster/letsencrypt-issuer.yaml`). The minikube overlay sets the hostname to
+`splitsecond.test`; the DOKS overlay sets `splitsecond.duckdns.org`.
 
 Envoy's default timeouts keep WebSockets open: a connection held for 150 seconds received every 30-second
 server ping, so no timeout policy is configured.
@@ -89,6 +90,108 @@ kubectl delete -k k8s/overlays/minikube   # keeps the PVC
 kubectl -n splitsecond delete pvc data-postgres-0
 kubectl apply -k k8s/overlays/minikube
 ```
+
+## DigitalOcean Kubernetes (DOKS)
+
+Cheaper demo shape: **1 node**, 4 GiB / 2 vCPU, plus a managed Load Balancer (~$12/mo) and Spaces
+(~$5/mo). Region prices are the same; pick whichever has capacity (cluster may be in `sfo2` while
+Spaces stay in `tor1`).
+
+### One-time cloud resources
+
+1. Container Registry named `splitsecond`, then `doctl registry login`.
+2. Spaces bucket `splitsecond-backups` (private) and a Spaces access key.
+3. DOKS cluster `splitsecond` (1× 4 GiB node), then:
+
+```sh
+doctl kubernetes cluster kubeconfig save splitsecond
+doctl kubernetes cluster registry add splitsecond
+```
+
+4. Hostname `splitsecond.duckdns.org` (DuckDNS). Point its A record at the Gateway LoadBalancer
+   IP **after** the first apply (step below).
+
+### Cluster add-ons and secrets
+
+```sh
+export LETSENCRYPT_EMAIL=you@example.com
+export S3_ENDPOINT=https://tor1.digitaloceanspaces.com
+export S3_REGION=tor1
+export S3_ACCESS_KEY=...
+export S3_SECRET_KEY=...
+export S3_BUCKET=splitsecond-backups
+
+./k8s/doks-setup.sh
+```
+
+DOKS already provides Gateway API CRDs and a `cilium` GatewayClass, so this script does **not**
+install Envoy Gateway (that chart conflicts with DOKS-managed CRDs). It installs cert-manager,
+applies the Let's Encrypt `ClusterIssuer`, and creates Secrets with Spaces credentials
+(`S3_FORCE_PATH_STYLE=false`). The DOKS overlay points the Gateway at `cilium` and enables
+TLS passthrough on the managed Load Balancer so cert-manager certificates terminate in-cluster.
+
+### Build, push, apply
+
+Use the **Basic** registry plan (5 GiB): both images together exceed the free Starter
+500 MiB limit. One repository is enough; tags are `api` and `postgres`:
+
+```sh
+doctl registry login
+REGISTRY=registry.digitalocean.com/splitsecond/splitsecond
+# zsh treats $REGISTRY:api as a path modifier — always quote the tag.
+# DOKS nodes are amd64; Macs often build arm64. Skip BuildKit attestations or
+# DOCR may store a tiny unusable manifest.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+  -t "${REGISTRY}:api" --push .
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+  -t "${REGISTRY}:postgres" -f docker/postgres/Dockerfile --push .
+
+# Confirm compressed sizes are tens/hundreds of MB, not a few KB
+doctl registry repository list-tags splitsecond
+
+kubectl apply -k k8s/overlays/doks
+kubectl -n splitsecond rollout status deployment/api --timeout=180s
+kubectl -n splitsecond rollout status statefulset/postgres --timeout=300s
+```
+
+The DOKS overlay sets `imagePullPolicy: Always` on the API and Postgres pods. Tags like
+`:api` are not `:latest`, so without Always a node can keep a stale (wrong-arch) image after
+you re-push the same tag. After a bad push, restart with
+`kubectl -n splitsecond rollout restart deployment/api statefulset/postgres`.
+
+### DNS and certificate
+
+```sh
+kubectl -n splitsecond get gateway splitsecond
+kubectl get svc -A -l io.cilium.gateway/owning-gateway=splitsecond
+```
+
+Put the `EXTERNAL-IP` into DuckDNS for `splitsecond`, then wait:
+
+```sh
+kubectl -n splitsecond get certificate
+curl -i https://splitsecond.duckdns.org/health
+curl -i https://splitsecond.duckdns.org/health/backup
+```
+
+### Day-2
+
+```sh
+# New API build (same quoting / platform / provenance flags as above)
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+  -t "${REGISTRY}:api" --push .
+kubectl -n splitsecond rollout restart deployment/api
+
+# Force a base backup
+kubectl -n splitsecond exec postgres-0 -c base-backup -- /backup/base-backup.sh --once
+
+# Optional: delete untagged layers left by failed pushes
+doctl registry garbage-collection start --include-untagged-manifests --force
+```
+
+To save money when not demoing, delete the Kubernetes cluster (the Load Balancer goes with it).
+Keep the Spaces bucket and registry so backups and images survive.
 
 ## Continuous integration
 

@@ -1,0 +1,21 @@
+# Production HTTPS: Let's Encrypt issues the Gateway certificate.
+# Same ClusterIssuer name as minikube (splitsecond-issuer), so the Gateway manifest is shared.
+#
+# Set the email before applying, or use k8s/doks-setup.sh which substitutes LETSENCRYPT_EMAIL.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: splitsecond-issuer
+spec:
+  acme:
+    email: LETSENCRYPT_EMAIL_PLACEHOLDER
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: splitsecond-letsencrypt
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: splitsecond
+                namespace: splitsecond
+                kind: Gateway
