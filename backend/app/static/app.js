@@ -56,6 +56,14 @@ function parseCents(text) {
 const centsToInput = (c) => (c / 100).toFixed(2);
 const fmtTime = (iso) => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 
+function localDate(value) {
+  const d = new Date(value);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 // Idempotency keys must be UUIDs. crypto.randomUUID only exists on HTTPS/localhost.
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -444,8 +452,8 @@ async function balancesTab(g, at = null) {
     at ? null : api("GET", `/api/groups/${g.id}/settlements`),
   ]);
   const container = h("div", {});
-  const dateInput = h("input", { type: "date", style: "max-width:170px", value: at ? at.slice(0, 10) : "",
-    max: new Date().toISOString().slice(0, 10),
+  const dateInput = h("input", { type: "date", style: "max-width:170px", value: at ? localDate(at) : "",
+    max: localDate(new Date()),
     onchange: guard(async (e) => {
       const v = e.target.value;
       const iso = v ? new Date(`${v}T23:59:59`).toISOString() : null;
