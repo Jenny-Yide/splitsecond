@@ -47,6 +47,24 @@ A ledger must not lose or corrupt data, so persistent storage and backups are ce
 
 ### Architecture
 
+```text
+Browsers / Phones (HTTPS + WSS)
+        │
+        ▼
+DigitalOcean Managed Load Balancer (TLS passthrough)
+        │
+        ▼
+Kubernetes Gateway API (Cilium on DOKS / Envoy on minikube + cert-manager TLS)
+        │
+        ▼
+Service: api ──► 2× stateless FastAPI pods (REST + WebSockets + PostgreSQL LISTEN/NOTIFY)
+                        │
+                        ▼
+             StatefulSet: postgres-0 (+ base-backup sidecar)
+                        ├──► 5 GiB PVC (DigitalOcean ReadWriteOnce Volume)
+                        └──► DigitalOcean Spaces (wal-g WAL + daily base backup + pg_dump CronJob)
+```
+
 Clients connect over HTTPS and WSS to the Gateway, which routes to the `api` Service. The Service has two FastAPI pods. Both pods talk to a single PostgreSQL pod (StatefulSet `postgres-0`, with a base-backup sidecar) whose data directory is on the PVC. PostgreSQL archives WAL, base backups and dumps to DigitalOcean Spaces, which is outside the cluster.
 
 The API is stateless, so any replica can serve any request and no sticky sessions are needed. The second replica is there for availability during rolling updates (`maxUnavailable: 0`) and not for load.
@@ -192,12 +210,15 @@ Deploying to DigitalOcean: create a Container Registry, a private Spaces bucket 
 export LETSENCRYPT_EMAIL=... S3_ENDPOINT=https://tor1.digitaloceanspaces.com S3_REGION=tor1 \
        S3_ACCESS_KEY=... S3_SECRET_KEY=... S3_BUCKET=splitsecond-backups
 ./k8s/doks-setup.sh
-docker buildx build --platform linux/amd64 --provenance=false --sbom=false -t "$REGISTRY:api" --push .
-docker buildx build --platform linux/amd64 --provenance=false --sbom=false -t "$REGISTRY:postgres" -f docker/postgres/Dockerfile --push .
+
+REGISTRY=registry.digitalocean.com/splitsecond/splitsecond
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false -t "${REGISTRY}:api" --push .
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false -t "${REGISTRY}:postgres" -f docker/postgres/Dockerfile --push .
 kubectl apply -k k8s/overlays/doks
 ```
 
-After the first apply, point the DuckDNS hostname at the Gateway's load balancer IP. `docs/infra.md` covers the details, including building amd64 images and `imagePullPolicy: Always`.
+After the first apply, point the DuckDNS hostname at the Gateway's load balancer IP. `docs/infra.md` covers the details, including quoting `"${REGISTRY}:api"` in `zsh`, building `linux/amd64` images without BuildKit attestations, and `imagePullPolicy: Always`.
 
 Repository layout:
 
@@ -210,36 +231,36 @@ Repository layout:
 - `k8s/`: Kustomize base and overlays (minikube, doks), cluster issuers, setup scripts
 - `docs/`: infrastructure and API docs, screenshots
 - `.github/workflows/`: CI
+- `ai-session.md`: concrete AI interaction records and verification notes
 
-Credentials: Credentials sent to TA. (TODO: confirm. If nothing was sent, replace this with "No private credentials are needed; secrets are generated locally from `.env.example`.")
+Credentials: No private credentials are needed to run or test SplitSecond locally—secrets are generated from `.env.example` or `k8s/create-secrets.sh`, with SeaweedFS standing in for DigitalOcean Spaces. On the live deployment, any reviewer can create a new account directly from the Sign up screen.
 
 ## Deployment Information
 
-Live application: https://splitsecond.duckdns.org
+Live application: [https://splitsecond.duckdns.org](https://splitsecond.duckdns.org) (health endpoints: [`/health`](https://splitsecond.duckdns.org/health), [`/health/backup`](https://splitsecond.duckdns.org/health/backup), [`/livez`](https://splitsecond.duckdns.org/livez))
 
-The app runs on a one-node DOKS cluster (4 GiB, 2 vCPU) with a managed load balancer. Images are in DigitalOcean Container Registry, the database volume is a DigitalOcean Volume, and backups are in a private Spaces bucket.
+The app runs on a one-node DOKS cluster (4 GiB, 2 vCPU) behind a DigitalOcean managed Load Balancer with Cilium Gateway API and Let's Encrypt HTTPS. Container images are stored in DigitalOcean Container Registry, the PostgreSQL data directory resides on a 5 GiB DigitalOcean Volume (`do-block-storage`), and WAL archives, base backups and daily logical dumps are stored in a private DigitalOcean Spaces bucket.
 
 ## AI Assistance & Verification (Summary)
 
-See [ai-session.md](ai-session.md) for the full records.
+See [`ai-session.md`](ai-session.md) for concrete prompts, AI responses, and how our team evaluated and corrected them (plus [`proposal-README.md`](proposal-README.md) for initial proposal-stage exploration).
 
-We used AI to brainstorm project topics and features, to question our design, and to explain or draft parts of the infrastructure. We worked out the problem and a first design ourselves before asking AI for design help.
-
-One example of a limitation: an early AI-drafted plan listed CPU-based auto-scaling as a main advanced feature. We questioned it because our traffic is a few requests per minute and would never reach a CPU threshold, so showing it would need fake load, and scaling the stateless API does not protect the single database. We replaced it with backup and recovery.
-
-We checked correctness in three ways. The database-backed tests, including the concurrency tests, run in CI on every push. Claims about PostgreSQL were checked against its documentation: the AI said NOTIFY is delivered only after commit, and the documentation confirmed that and also said sessions that are not listening at that moment never receive the message, which is why clients reload the bill on reconnect. Backups were verified with the restore drills above, comparing restored balances to snapshots computed with the ledger's own functions.
+- **Where and why AI contributed:** We framed the expense-splitting problem, integer-cent ledger invariants, and module boundaries ourselves first, then used AI tools to critique architecture trade-offs, scaffold Docker/Kubernetes/backup automation (`wal-g`, `pg_dump`, Kustomize overlays, GitHub Actions CI), troubleshoot cloud deployment on DOKS, and polish the mobile web UI and WebSocket state handling.
+- **Representative mistakes and limitations in AI output:** During DOKS deployment, the AI generated `k8s/doks-setup.sh` to install Envoy Gateway via Helm (mirroring minikube), which failed immediately on the cluster because DOKS manages the Gateway API CRDs itself and ships a built-in `cilium` `GatewayClass` (`ai-session.md`, Session 2). In the same rollout, the AI's initial image push commands omitted `zsh`-safe parameter braces, `--platform linux/amd64`, and `--provenance=false`, and then falsely diagnosed the resulting 5 KB DOCR manifest stub as hitting a 500 MB Starter registry quota when our account was already on the 5 GiB Basic tier (`ai-session.md`, Session 3). Earlier, we also rejected an AI proposal for CPU-based Horizontal Pod Autoscaling (inapplicable to low student traffic and useless for protecting our single stateful PostgreSQL instance) in favor of continuous WAL archiving, and had to add `timeout 120` after discovering `wal-g wal-push` hung silently during simulated storage outages (`ai-session.md`, Session 1).
+- **How correctness was verified:**
+  1. *Automated tests and CI:* 55 PostgreSQL-backed unit, API, and multi-threaded concurrency tests (`test_versioning_concurrency.py`, `test_finalize_concurrency.py`, `test_settlement_concurrency.py`), a two-replica Compose smoke check, and `kubeconform` manifest validation run on every push and PR, complemented by `tools/e2e_two_replicas.py` and a 150-second WebSocket session test through the Gateway.
+  2. *Documentation and live cluster/UI inspection:* PostgreSQL `LISTEN/NOTIFY` post-commit delivery and no-replay behavior were verified against official PostgreSQL documentation (motivating full bill re-fetch on reconnect); cloud fixes were verified via `kubectl get crd/gatewayclass/certificate` and `doctl registry repository list-tags`; and UI/WebSocket fixes (`[hidden]` CSS override and `ws.onclose` race) were verified across `390px` mobile and `1024px` desktop viewports (`ai-session.md`, Session 4).
+  3. *Outage injection and restore drills:* Stopping local S3 (`SeaweedFS`) verified `/health/backup` lag (75 s), failure (135 s), and recovery (30 s) transitions, and four minikube restore drills with `backup/verify_balances.py` and `backup/drill_writer.py` caught two `restore-pitr.sh` bugs and measured a 107 s RPO and 66 s RTO with exact balance agreement.
 
 ## Individual Contributions
 
-(TODO: check against `git log` before submitting.)
+Aligned with the repository's Git commit and pull request history:
 
-Cheng Zhao: the ledger and data layer. This covers the PostgreSQL schema, integer-cent split and rounding logic for equal, exact and shares modes, append-only versioning with optimistic concurrency, soft delete and restore, historical balances, settle-up, settlement recording, bill finalization, and the ledger and concurrency tests.
+- **Cheng Zhao** (`chengzhao363` — PR #1 / `53bd572`, `c1a0e1c`): Ledger core and data layer (`backend/schema.sql`, `backend/ledger/`, and 11 ledger and concurrency test suites in `backend/tests/`). Designed and implemented the PostgreSQL schema, deterministic integer-cent splitting and largest-remainder rounding across equal, exact, and shares modes, append-only expense versioning with `SELECT ... FOR UPDATE` optimistic concurrency, soft delete and restore, historical balance queries (`get_balances_at`), greedy `n − 1` settle-up, idempotent settlement recording, itemized bill finalization, and automated concurrency race tests.
+- **Jenny Qin** (`Jenny-Yide` — `820a0be`, `6894516`, `4eeae61`, `7569f16`): Application layer, realtime protocol, and documentation (`backend/app/api.py`, `auth.py`, `db.py`, `main.py`, `realtime.py`, `backend/app/static/`, `backend/tests/test_api.py`, `tools/e2e_two_replicas.py`, `docs/api.md`). Implemented the FastAPI REST routes, bcrypt + JWT authentication and group-membership authorization, live-bill item claiming (`FOR SHARE` vs. `FOR UPDATE`), cross-replica WebSockets backed by PostgreSQL `LISTEN/NOTIFY`, the mobile-first single-page web UI, the 18 API integration tests, the two-replica WebSocket E2E check, and the report screenshots and user guide.
+- **Fuchun Chai** (`fuchun.chai` — PRs #2, #3, #4, #6, #10, #12, #13 and backup/restore commits `b7212da`–`198f64b`): Cloud infrastructure, persistence, backup/recovery, CI, and UI polish (`Dockerfile`, `docker/`, `docker-compose.yml`, `nginx/`, `k8s/`, `backup/`, `.github/workflows/ci.yml`, `docs/infra.md`, `backend/app/static/`, `ai-session.md`). Built the Docker and two-replica Compose stack, minikube and DOKS Kustomize overlays, Gateway API routing (Envoy on minikube, Cilium on DOKS) with `cert-manager` / Let's Encrypt HTTPS, the `wal-g` continuous WAL archive + base-backup sidecar + `pg_dump` CronJob pipeline to DigitalOcean Spaces, PITR restore tooling and measured minikube restore drills, `/livez` + `/health` + `/health/backup` monitoring, GitHub Actions CI, and frontend visual/WebSocket polish.
 
-Jenny Qin: the application layer. This covers the FastAPI API, authentication (bcrypt and JWT) and group permissions, the mobile web UI, WebSockets with LISTEN/NOTIFY, the live-bill claiming API, the API tests and the two-replica end-to-end check.
-
-Fuchun Chai: infrastructure. This covers the Dockerfiles, Compose, the Kubernetes manifests, Gateway API and HTTPS, the DOKS deployment, persistent storage, wal-g backups and point-in-time recovery, the restore drills, health and backup monitoring, and the CI workflow.
-
-Pull requests were reviewed by someone from another area.
+Pull requests were cross-reviewed across areas so every team member stayed familiar with the full stack.
 
 ## Lessons Learned and Concluding Remarks
 
@@ -247,9 +268,11 @@ Pull requests were reviewed by someone from another area.
 - Backups need to be restored to be trusted. The drills found two bugs in our restore script and gave us measured numbers (107 s RPO, 66 s RTO).
 - Having PostgreSQL enforce correctness through constraints, row locks and one transaction per request gave us idempotency and no lost updates with less code than application-level locking.
 - LISTEN/NOTIFY was enough for our realtime needs and let us avoid Redis, but we had to work around its limits: small payloads and no replay.
-- Several cloud details cost us time. DOKS manages the Gateway API CRDs, so Envoy Gateway could not be installed there. Images built on a Mac are arm64 while the nodes are amd64. wal-g can retry for many minutes without failing unless a timeout is set.
+- Several cloud details cost us time. DOKS manages the Gateway API CRDs, so Envoy Gateway could not be installed there. Images built on a Mac are arm64 while the nodes are amd64, and Docker BuildKit attestations break DOCR tags unless disabled. wal-g can retry for many minutes without failing unless a timeout is set.
 
 Known limitations: the database is a single point of failure, edits support only equal splits and cannot change the payer, the history does not show who made a change, and there is no multi-currency support or native app.
+
+Overall, building SplitSecond showed how application-level invariants (integer cents, append-only versioning, row locking) and infrastructure-level resilience (stateful volumes, continuous WAL archiving, tested point-in-time restores, and multi-replica stateless routing) reinforce one another in a cloud-native financial web application.
 
 ## Video Demo
 
